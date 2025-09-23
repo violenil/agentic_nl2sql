@@ -1,13 +1,25 @@
-name: "SQL Synthesis"
+name: "SQL Generation"
 prompt: |
-  Given the question and the context below, write ONLY the final SQL query.
-  Do NOT add a LIMIT unless explicitly requested. End with a semicolon.
+  You are an expert SQL query writer.
   
+  Given the question and context below, write ONLY the final SQL query.
+  - Use explicit JOIN ... ON syntax (never comma-separated tables in FROM).
+  - Do NOT add a LIMIT unless explicitly requested.
+  - End with a semicolon.
+
+  Return the SQL as plain text, nothing else.
+  Do not output Markdown code fences (```...```, sql, etc.). Output only valid SQL text.
+
+  Example:
+  SELECT COUNT(*) 
+  FROM student 
+  WHERE student.age > 20;
+
   Question:
   {question}
 
   Relevant tables/attributes:
-  {stage1output}
-  
+  {stage1}
+
   Value instances:
-  {stage2output}
+  {stage2}

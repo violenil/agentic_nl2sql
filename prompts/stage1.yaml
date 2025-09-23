@@ -1,7 +1,14 @@
 name: "Table/Attribute Selection"
 prompt: |
-  Select the relevant tables and attributes given the natural language query below.
-  Return only the list of tables and attributes.
+  You are an expert database assistant.
+  Select the relevant tables and attributes from the schema that are needed
+  to answer the natural language question. Return the result strictly as JSON.
+
+  Example:
+  {{
+    "tables": ["student"],
+    "attributes": ["age"]
+  }}
 
   Question:
   {question}

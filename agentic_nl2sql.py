@@ -106,6 +106,26 @@ def build_sqlite_in_memory_from_sqlite_dir(sqlite_dir: str) -> sqlite3.Connectio
     return conn
 
 
+def build_sqlite_in_memory_from_sqlite_file(sqlite_file: str) -> sqlite3.Connection:
+    """Load a single SQLite file into an in-memory DB preserving original table names.
+    Copies each table from the file into main without prefixes.
+    """
+    path = os.path.abspath(os.path.expanduser(sqlite_file))
+    if not os.path.isfile(path):
+        raise RuntimeError(f"SQLITE_DB_FILE not found: {sqlite_file}")
+    log(f"Starting SQLite load from file: {path}")
+    conn = sqlite3.connect(':memory:')
+    conn.execute("ATTACH DATABASE ? AS src", (path,))
+    cursor = conn.execute("SELECT name FROM src.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    tables = [row[0] for row in cursor.fetchall()]
+    log(f"Copying {len(tables)} tables from file with original names")
+    for tbl in tables:
+        conn.execute(f"CREATE TABLE \"{tbl}\" AS SELECT * FROM src.\"{tbl}\"")
+    conn.execute("DETACH DATABASE src")
+    log("Completed single-file load")
+    return conn
+
+
 def ensure_dir(path: str):
     if not os.path.isdir(path):
         os.makedirs(path)
@@ -157,6 +177,27 @@ def retry_with_backoff(callable_fn, max_retries: int = 5, base_delay: float = 1.
             jitter = sleep_s * (0.5 + random.random() * 0.5)
             time.sleep(jitter)
             attempt += 1
+
+
+def extract_sql_from_text(raw_text: str) -> str:
+    """Extract a clean single SQL statement from possibly fenced text.
+    - Removes markdown code fences (``` and language tag like sql)
+    - Strips leading 'sql' token
+    - Returns first statement up to first semicolon; ensures trailing semicolon
+    """
+    s = (raw_text or "").strip()
+    # Remove triple backticks and language hints
+    s = s.replace("```", "").strip()
+    s = re.sub(r"^\s*sql\b[:\-]*\s*", "", s, flags=re.IGNORECASE)
+    # If fenced with ```sql ... ```, the above handles both
+    # Extract first statement ending with ;
+    try:
+        stmt = re.findall(r"[\s\S]*?;", s)[0]
+    except Exception:
+        stmt = s
+        if not stmt.endswith(';'):
+            stmt += ';'
+    return stmt.strip()
 
 
 def make_sql_agent(conn: sqlite3.Connection) -> any:
@@ -213,22 +254,89 @@ def make_sql_agent(conn: sqlite3.Connection) -> any:
     return agent
 
 
+def make_stage1_agent(stage1_prompt_path: str | None):
+    """Agent for Stage 1: select relevant tables/attributes."""
+    llm = setup_azure_llm()
+
+    def run_stage1(question: str, schema_listing: str) -> str:
+        if stage1_prompt_path and os.path.isfile(stage1_prompt_path):
+            with open(stage1_prompt_path, 'r', encoding='utf-8') as f:
+                template = f.read()
+        else:
+            template = (
+                "Select the relevant tables and attributes given the natural language query below. "
+                "Return only the list of tables and attributes.\n\n"
+                "Question:\n{question}\n\nSchema:\n{schema}\n"
+            )
+        prompt = template.format(question=question, schema=schema_listing)
+        out = retry_with_backoff(lambda: llm.invoke(prompt))
+        return out.content if hasattr(out, 'content') else str(out)
+
+    return run_stage1
+
+
+def make_stage2_agent(stage2_prompt_path: str | None):
+    """Agent for Stage 2: extract literal value instances for predicates."""
+    llm = setup_azure_llm()
+
+    def run_stage2(question: str, stage1_text: str) -> str:
+        if stage2_prompt_path and os.path.isfile(stage2_prompt_path):
+            with open(stage2_prompt_path, 'r', encoding='utf-8') as f:
+                template = f.read()
+        else:
+            template = (
+                "Given the following natural language query, extract likely literal values that should appear in SQL predicates "
+                "(e.g., WHERE col = \"VALUE\"). Return only the values and the likely columns they map to if possible.\n\n"
+                "Question:\n{question}\n\nRelevant tables/attributes:\n{stage1}\n"
+            )
+        prompt = template.format(question=question, stage1=stage1_text)
+        out = retry_with_backoff(lambda: llm.invoke(prompt))
+        return out.content if hasattr(out, 'content') else str(out)
+
+    return run_stage2
+
+
+def make_stage3_agent(stage3_prompt_path: str | None):
+    """Agent for Stage 3: synthesize final SQL given Stage 1+2 context."""
+    llm = setup_azure_llm()
+
+    def run_stage3(question: str, stage1_text: str, stage2_text: str) -> str:
+        if stage3_prompt_path and os.path.isfile(stage3_prompt_path):
+            with open(stage3_prompt_path, 'r', encoding='utf-8') as f:
+                template = f.read()
+        else:
+            template = (
+                "Given the question and the context below, write ONLY the final SQL query. "
+                "Use explicit JOIN ... ON syntax (never comma-separated tables in FROM). "
+                "Do NOT add a LIMIT unless explicitly requested. End with a semicolon.\n\n"
+                "Question:\n{question}\n\nRelevant tables/attributes:\n{stage1}\n\nValue instances:\n{stage2}\n"
+            )
+        prompt = template.format(question=question, stage1=stage1_text, stage2=stage2_text)
+        out = retry_with_backoff(lambda: llm.invoke(prompt))
+        return out.content if hasattr(out, 'content') else str(out)
+
+    return run_stage3
+
 def main():
     load_dotenv(override=True)
     log("Environment loaded")
 
     table_dict_path = os.getenv('TABLE_DICT')
     sqlite_db_dir = os.getenv('SQLITE_DB_DIR')
+    sqlite_db_file = os.getenv('SQLITE_DB_FILE')
     question_file_path = os.getenv('QUESTION_FILE_PATH')
     predict_file_path = os.getenv('PREDICT_FILE_PATH')
     force = os.getenv('FORCE', 'False')
     force = force.lower() in ('1', 'true', 'yes')
+    stage1_prompt_path = os.getenv('STAGE1_PROMPT_PATH')
+    stage2_prompt_path = os.getenv('STAGE2_PROMPT_PATH')
+    stage3_prompt_path = os.getenv('STAGE3_PROMPT_PATH')
 
     if not question_file_path or not predict_file_path:
         raise RuntimeError('Expected env vars QUESTION_FILE_PATH and PREDICT_FILE_PATH')
 
     dict_path_csv = None
-    if not sqlite_db_dir:
+    if not sqlite_db_file and not sqlite_db_dir:
         if not table_dict_path:
             raise RuntimeError('Provide either SQLITE_DB_DIR or TABLE_DICT')
         with open(table_dict_path, 'r') as f:
@@ -237,14 +345,16 @@ def main():
 
     # Disable question_logs/question_last outputs
 
-    # Build DB in memory and create agent
-    if sqlite_db_dir:
+    # Build DB in memory and create agent (priority: single file > dir > csvs)
+    if sqlite_db_file:
+        print("Building DB from single sqlite file")
+        conn = build_sqlite_in_memory_from_sqlite_file(sqlite_db_file)
+    elif sqlite_db_dir:
         print("Building DB from sqlite directory")
         conn = build_sqlite_in_memory_from_sqlite_dir(sqlite_db_dir)
     else:
-        print("Build DB from csv files")
+        print("Building DB from csv files")
         conn = build_sqlite_in_memory_from_csvs(dict_path_csv)
-    agent = make_sql_agent(conn)
     print("Done building DB")
 
     questions = read_questions_from_file(question_file_path)
@@ -277,31 +387,33 @@ def main():
         nl_query = raw_q[0].upper() + raw_q[1:] if raw_q else raw_q
         # No skip based on prior logs; always process sampled questions
 
-        # Ask the agent to produce SQL only
-        system_hint = (
-            "You are a text-to-SQL assistant. Return ONLY the final SQL query, "
-            "no markdown fences, no explanation. Use explicit JOIN ... ON syntax "
-            "(never comma-separated tables in FROM). Always terminate with a semicolon."
-        )
-        try:
-            # LangChain agent interface: call with a prompt that nudges SQL-only output.
-            log(f"[{idx}/{total}] Invoking agent for SQL generation")
-            result = retry_with_backoff(lambda: agent.invoke({
-                'input': f"{system_hint}\nQuestion: {nl_query}",
-            }))
-            # result may be dict or string depending on LC version
-            sql_text = result.get('output') if isinstance(result, dict) else str(result)
-        except Exception as e:
-            sql_text = f"-- agent_error: {e}"
-            log(f"Agent invocation failed: {e}")
+        # Helper: build schema listing for prompts
+        def build_schema_listing(limit_tables: int | None = None) -> str:
+            cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            tables = sorted([r[0] for r in cur.fetchall()])
+            if limit_tables is not None:
+                tables = tables[:limit_tables]
+            lines = []
+            for t in tables:
+                cols = [r[1] for r in conn.execute(f"PRAGMA table_info(\"{t}\")").fetchall()]
+                lines.append(f"Table name: {t}\nAttributes: {', '.join(cols)}")
+            return "\n\n".join(lines)
+
+        # Stage 1 agent
+        schema_listing = build_schema_listing()
+        log(f"[{idx}/{total}] Stage 1: relevant attributes")
+        stage1_text = make_stage1_agent(stage1_prompt_path)(nl_query, schema_listing)
+
+        # Stage 2 agent
+        log(f"[{idx}/{total}] Stage 2: value instances")
+        stage2_text = make_stage2_agent(stage2_prompt_path)(nl_query, stage1_text)
+
+        # Stage 3 agent
+        log(f"[{idx}/{total}] Stage 3: NL-to-SQL synthesis")
+        sql_text = make_stage3_agent(stage3_prompt_path)(nl_query, stage1_text, stage2_text)
 
         # Try to extract the first terminated SQL statement
-        try:
-            query = re.findall(r"^(?!.*\\bsql\\b)[\\s\\S]+?;", sql_text.replace("```", "").strip() + ";", re.MULTILINE)[0]
-        except Exception:
-            query = sql_text.strip()
-            if not query.endswith(';'):
-                query += ';'
+        query = extract_sql_from_text(sql_text)
 
         # Execute on in-memory DB to validate quickly
         exec_err = None
@@ -320,12 +432,7 @@ def main():
                 log(f"[{idx}/{total}] Attempting correction via LLM")
                 fixed = retry_with_backoff(lambda: llm.invoke(correction_prompt))
                 corrected = fixed.content if hasattr(fixed, 'content') else str(fixed)
-                try:
-                    query = re.findall(r"^(?!.*\\bsql\\b)[\\s\\S]+?;", corrected.replace("```", "").strip() + ";", re.MULTILINE)[0]
-                except Exception:
-                    query = corrected.strip()
-                    if not query.endswith(';'):
-                        query += ';'
+                query = extract_sql_from_text(corrected)
                 # re-try execution silently
                 try:
                     log(f"[{idx}/{total}] Re-validating corrected SQL")

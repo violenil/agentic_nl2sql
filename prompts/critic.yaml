@@ -1,0 +1,21 @@
+name: "Design Critique"
+prompt: |
+  You are an expert system inspector for a 3-stage NL→SQL pipeline.
+
+  Given:
+  - The natural language question: {question}
+  - The database schema: {schema}
+  - The predicted SQL query: {sql}
+  - Stage1 output (tables/attributes): {stage1}
+  - Stage2 output (values/predicates): {stage2}
+  - Analyzer report: {analysis}
+
+  Diagnose where the pipeline likely failed.
+
+  Return your critique STRICTLY as JSON in the following format:
+
+  {{
+    "likely_stage": "stage1" | "stage2" | "stage3" | null,
+    "issues": ["list of detected problems"],
+    "notes": ["supporting reasoning"]
+  }}

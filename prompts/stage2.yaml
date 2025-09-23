@@ -1,0 +1,11 @@
+name: "Literal Extraction"
+prompt: |
+  Given the following natural language query, extract likely literal values that should appear in SQL predicates
+  e.g., WHERE col = \"VALUE\"
+  Return only the values and the likely columns they map to if possible.
+  
+  Question:
+  {question}
+
+  Relevant tables/attributes:
+  {stage1output}

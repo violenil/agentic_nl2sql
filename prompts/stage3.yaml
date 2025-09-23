@@ -1,0 +1,13 @@
+name: "SQL Synthesis"
+prompt: |
+  Given the question and the context below, write ONLY the final SQL query.
+  Do NOT add a LIMIT unless explicitly requested. End with a semicolon.
+  
+  Question:
+  {question}
+
+  Relevant tables/attributes:
+  {stage1output}
+  
+  Value instances:
+  {stage2output}

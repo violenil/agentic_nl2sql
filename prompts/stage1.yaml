@@ -1,0 +1,10 @@
+name: "Table/Attribute Selection"
+prompt: |
+  Select the relevant tables and attributes given the natural language query below.
+  Return only the list of tables and attributes.
+
+  Question:
+  {question}
+
+  Schema:
+  {schema}

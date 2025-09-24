@@ -1,116 +1,142 @@
-## Agentic NL2SQL
+## Agentic NL2SQL (LangGraph pipeline)
 
-Lightweight pipeline to convert natural language questions to SQL against a SQLite database, validate executions, and write predictions for downstream evaluation.
+End-to-end, multi-stage NL→SQL system with critique-driven prompt refinement and partial reruns. The core orchestration lives in `agentic_nl2sql_graph.py` and uses LangGraph to coordinate stages, analysis, critique, and targeted refinements.
 
-### Features
-- In-memory SQLite built from either:
-  - A directory of `.sqlite/.db` files (merged into one connection), or
-  - CSVs listed in a JSON table map.
-- Agentic SQL generation with Azure OpenAI + LangChain.
-- Schema-thinning to control tokens/latency (filter/cap tables, optional sample rows).
-- Validation and one-pass auto-correction on execution error.
-- Deterministic question sampling (first N) and progress logging.
+### Architecture Overview
+- **Stage 1 (Relevant attributes)**: select relevant tables/columns for the question.
+- **Stage 2 (Value instances)**: extract likely literal values for predicates.
+- **Stage 3 (SQL synthesis)**: generate the final SQL using outputs of Stage 1 and 2.
+- **Analyzer**: executes/inspects SQL against SQLite; reports syntax, exec status, sample rows, and semantic hints.
+- **Critic**: LLM evaluates the output and analysis; returns a structured critique with `likely_stage` to improve.
+- **Refiner**: updates the prompt for the chosen stage and records the change.
+- **Refinement Router**: restarts the graph from `stage1`, `stage2`, or `stage3` depending on which stage was refined (not always from stage1).
 
-### Requirements
-- Python 3.10+
-- An Azure OpenAI deployment for Chat Completions (e.g., GPT-4o).
+### Key Behaviors
+- **Partial reruns from refined stage**: After a refinement, the graph resumes at the refined stage:
+  - `stage1` refinement → rerun `stage1_rerun → stage2_rerun → stage3_rerun → analyzer_rerun`.
+  - `stage2` refinement → rerun `stage2_rerun → stage3_rerun → analyzer_rerun`.
+  - `stage3` refinement → rerun `stage3_rerun → analyzer_rerun`.
+- **Early stop / retry policy**: A router decides to stop or continue refining based on analysis improvements and a max-refinements cap.
+- **History logging**: Prompt changes are appended to timestamped files under `history/`.
 
-### Install
+### Repository Layout (selected)
+- `agentic_nl2sql_graph.py`: LangGraph pipeline orchestration and entry point.
+- `agents/`
+  - `stage1.py`, `stage2.py`, `stage3.py`: stage agents powered by prompts.
+  - `analyzer.py`: SQLite-based analysis and semantic hints.
+  - `critic.py`: LLM-based critique returning JSON with `likely_stage`.
+  - `refiner.py`: updates prompts and logs changes.
+- `core/prompt_manager.py`: loads prompts from `prompts/*.yaml`, supports both single `prompt` or split `system/user` forms.
+- `prompts/`: stage prompts and the `critic`/`refiner` templates.
+- `f1.sqlite`: example SQLite database (or use your own via env var).
+
+### Installation
 ```bash
-python -m venv venv && source venv/bin/activate
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Environment
-Create a `.env` in the repo root. Choose ONE database input method.
+### Environment Variables
+Create a `.env` in the repo root. The graph expects a single SQLite file path.
 
 ```ini
-# --- Azure OpenAI ---
-AZURE_OPENAI_API_KEY=your_azure_key
+# SQLite database to analyze queries against
+SQLITE_DB_FILE=/absolute/path/to/your.db
+
+# Optional: cap the number of refinement loops (default 3)
+MAX_REFINEMENTS=3
+
+# Azure OpenAI settings used by agents (names match your deployments)
+AZURE_OPENAI_API_KEY=...
 AZURE_OPENAI_ENDPOINT=https://your-endpoint.openai.azure.com/
-# Optional; defaults used if omitted
-AZURE_OPENAI_API_VERSION=2024-02-01
-AZURE_OPENAI_DEPLOYMENT=lunar-chatgpt-4o
-
-# --- Database Source (choose one) ---
-# Option A: Directory of SQLite files (merged into an in-memory DB)
-SQLITE_DB_DIR=/absolute/path/to/sqlite_dir
-
-# Option B: CSVs listed in a JSON file mapping table name -> csv path
-# TABLE_DICT=/absolute/path/to/table_map.json
-
-# --- Questions & Outputs ---
-QUESTION_FILE_PATH=/absolute/path/to/questions.txt
-PREDICT_FILE_PATH=/absolute/path/to/predictions/pred.txt
-
-# --- Optional controls ---
-# Take first N questions deterministically (omit or 0 = all)
-SAMPLE_SIZE=50
-
-# Schema thinning: include only matching prefixes (comma-separated)
-# Example: academic__,college__
-DB_INCLUDE_TABLE_PREFIX=
-
-# Cap number of tables included (omit to disable)
-DB_MAX_TABLES=15
-
-# Number of sample rows per table to include in schema context (0 = none)
-DB_SAMPLE_ROWS_IN_TABLE_INFO=0
-
-# Treat existing per-question artifacts as ignorable; this script no longer writes them
-FORCE=false
+AZURE_OPENAI_API_VERSION=2024-12-01-preview
+# Example deployment names (adjust to your setup)
+AZURE_OPENAI_DEPLOYMENT=lunar-gpt-4o
 ```
 
-Example `TABLE_DICT` (if using CSVs):
-```json
-{
-  "students": "/abs/path/to/students.csv",
-  "courses": "/abs/path/to/courses.csv"
-}
-```
+### Running the LangGraph Pipeline
+You can execute the pipeline directly via the module’s `__main__` block, which demonstrates the flow on a sample question and writes a prompt-evolution log.
 
-### Run
 ```bash
 source venv/bin/activate
-python agent_langchain.py
+python agentic_nl2sql_graph.py
 ```
 
-### What it does
-1. Loads env and builds an in-memory SQLite DB:
-   - If `SQLITE_DB_DIR` is set, each file is attached, tables are copied into `main` as `filename__table`, then detached (no 10-DB limit).
-   - Else it loads CSVs from `TABLE_DICT` into tables.
-2. Prepares a schema-limited `SQLDatabase`:
-   - `DB_INCLUDE_TABLE_PREFIX`, `DB_MAX_TABLES` control table visibility.
-   - `DB_SAMPLE_ROWS_IN_TABLE_INFO` controls example rows in schema (0 by default).
-3. For the first `SAMPLE_SIZE` questions (or all):
-   - Generates SQL with a strict system hint (explicit JOIN ... ON; semicolon).
-   - Retries on 429 with backoff.
-   - Validates via `pd.read_sql`; on error, requests one correction and re-validates.
-   - Appends the final SQL (single line) to `PREDICT_FILE_PATH`.
+What happens:
+- Loads `.env` and prompts from `prompts/` via `PromptManager`.
+- Builds an inline schema string from `SQLITE_DB_FILE` for stage prompts.
+- Runs `stage1 → stage2 → stage3 → analyzer → critic → refiner`.
+- Uses the refinement router to restart from the refined stage (if any), then `analyzer_rerun` decides to stop or continue based on improvement and `MAX_REFINEMENTS`.
+- Prints the final SQL, analysis, critique, and refinement summary.
 
-### Outputs
-- Predictions: one SQL per line in `PREDICT_FILE_PATH`.
-- Gold: this script does not write gold. Provide your own gold file to your evaluation pipeline.
+### Prompts
+- Stored in `prompts/*.yaml`.
+- File keys supported:
+  - Single-key form: `prompt: "..."` for stage prompts.
+  - Dual-key form: `system: "..."` and `user: "..."` for `critic`/`refiner` templates.
+- The `RefinerAgent` updates the in-memory prompt set and logs diffs to `history/prompt_evolution_*.log`.
 
-### Logging & Progress
-- Timestamps for: DB build, source DB attaches, table copies, schema summary, per-question steps, retries, validation, and completion.
-- Progress prefix `[i/N]` is printed for each question.
+### Analyzer Outputs
+The `ExperimentAnalyzer` returns a JSON-like dict including:
+- `syntax_ok`: boolean
+- `exec_ok`: boolean
+- `row_count_sample`: integer sample size
+- `rows_sample`: small sample of result rows
+- `columns`: column names
+- `error`: syntax/exec error if any
+- `semantic_hints`: lightweight hints to guide the critic
 
-### Tuning Tips
-- If requests are slow or rate-limited:
-  - Reduce `DB_MAX_TABLES`, add prefixes in `DB_INCLUDE_TABLE_PREFIX`.
-  - Keep `DB_SAMPLE_ROWS_IN_TABLE_INFO=0` or at most 1–3 to reduce tokens.
-  - Lower `SAMPLE_SIZE`.
-- If joins are incorrect:
-  - Slightly increase `DB_SAMPLE_ROWS_IN_TABLE_INFO` (1–2) to reveal key columns.
-  - Tighten prefixes so only relevant tables are visible.
+### Critique and Refinement
+- `CriticAgent` produces JSON with at least `likely_stage` and issue notes.
+- `RefinerAgent` consumes the critique, refines the prompt for that stage, and records a log entry. It also returns `{"stage": "stage1|stage2|stage3", ...}` used by the router.
+
+### Rerun and Acceptance Logic
+- After a refinement, the router selects the appropriate rerun entry (`stage1_rerun | stage2_rerun | stage3_rerun`).
+- The rerun chain always proceeds forward to `analyzer_rerun`.
+- A decision node compares the latest analysis to the previous analysis to either stop or loop back for another critique/refinement, honoring `MAX_REFINEMENTS`.
+
+### Example: Custom Invocation
+Programmatically invoke the compiled graph with a custom question and DB path.
+
+```python
+from agentic_nl2sql_graph import graph, PromptManager, get_schema_string
+import os
+
+pm = PromptManager(prompt_dir="prompts")
+question = "Which teams scored the most points in 2010?"
+schema = get_schema_string(os.getenv("SQLITE_DB_FILE"))
+
+state = {
+    "prompt_manager": pm,
+    "question": question,
+    "schema": schema,
+    "config": {
+        "db_path": os.getenv("SQLITE_DB_FILE"),
+        "history_file": "history/prompt_evolution_custom.log",
+    },
+    "refinement_count": 0,
+}
+
+final_state = graph.invoke(state)
+print(final_state.get("sql"))
+```
+
+### CLI/Batch Alternative
+For batch prediction over a questions file with schema-thinning and basic error-correction, see `agentic_nl2sql.py`. It builds an in-memory DB (from a single file, a directory of SQLite files, or CSVs), generates SQL, validates/corrects, and writes one SQL per line to an output file.
+
+### Logging & History
+- Prompt refinements are appended to `history/prompt_evolution_*.log` with stage, issues, notes, explanation, and before/after prompt content.
+- The graph prints a concise summary of the final artifacts to stdout.
+
+### Requirements
+- Python 3.10+
+- Valid Azure OpenAI Chat Completions deployment(s)
 
 ### Troubleshooting
-- 429 Rate limit: the script retries with exponential backoff automatically. If persistent, lower table count/sample rows or increase Azure quota.
-- “too many attached databases”: Avoided by copying tables one source DB at a time, then detaching.
-- Evaluator KeyError ",": Ensure generated SQL uses explicit `JOIN ... ON`, not comma-separated tables in FROM (already enforced by the system hint).
+- Ensure `SQLITE_DB_FILE` points to a readable SQLite file; analysis uses that DB directly.
+- If LLM requests fail, verify Azure environment variables and deployment names.
+- If the rerun always starts from stage1, confirm the critic returns a valid `likely_stage` and that prompts for `critic/refiner` are present.
 
 ### License
 MIT or project’s default; update as needed.
-
-

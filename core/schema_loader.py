@@ -22,9 +22,7 @@ def get_schema_from_sqlite(db_path: str) -> str:
         cursor.execute(f"PRAGMA foreign_key_list({table});")
         fks = cursor.fetchall()
         for fk in fks:
-            schema_parts.append(
-                f"FOREIGN KEY: {table}.{fk[3]} → {fk[2]}.{fk[4]}"
-            )
+            schema_parts.append(f"FOREIGN KEY: {table}.{fk[3]} → {fk[2]}.{fk[4]}")
 
     conn.close()
     return "\n".join(schema_parts)

@@ -1,4 +1,5 @@
-from typing import TypedDict, Dict, Any
+from typing import Any, Dict, TypedDict
+
 
 class NL2SQLState(TypedDict):
     question: str

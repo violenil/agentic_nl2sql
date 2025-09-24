@@ -1,8 +1,9 @@
 import os
 from datetime import datetime
+from typing import Any, Dict, TypedDict
 
-from langgraph.graph import StateGraph, END
-from typing import TypedDict, Any, Dict
+import dotenv
+from langgraph.graph import END, StateGraph
 
 from agents.analyzer import ExperimentAnalyzer
 from agents.critic import CriticAgent
@@ -10,9 +11,6 @@ from agents.refiner import RefinerAgent
 from agents.stage1 import Stage1Agent
 from agents.stage2 import Stage2Agent
 from agents.stage3 import Stage3Agent
-
-import dotenv
-
 from core.prompt_manager import PromptManager
 
 MAX_REFINEMENTS = int(os.getenv("MAX_REFINEMENTS", "3"))

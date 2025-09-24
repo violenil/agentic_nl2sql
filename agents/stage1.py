@@ -1,20 +1,23 @@
 import json
-from typing import Dict, Any
+from typing import Any, Dict
+
+from langchain.schema import HumanMessage
+from langchain_openai import AzureChatOpenAI
 
 from core.prompt_manager import PromptManager
-from langchain_openai import AzureChatOpenAI
-from langchain.schema import HumanMessage
 
 
 class Stage1Agent:
-    def __init__(self, prompt_manager: PromptManager, deployment_name: str = "lunar-gpt-4o"):
+    def __init__(
+        self, prompt_manager: PromptManager, deployment_name: str = "lunar-gpt-4o"
+    ):
         self.prompt_manager = prompt_manager
         self.llm = AzureChatOpenAI(
             deployment_name=deployment_name,
             api_version="2024-12-01-preview",
-            temperature=0,         # deterministic
+            temperature=0,  # deterministic
             max_tokens=500,
-            model_kwargs={"response_format": {"type": "json_object"}}
+            model_kwargs={"response_format": {"type": "json_object"}},
         )
 
     def run(self, question: str, schema: str) -> Dict[str, Any]:

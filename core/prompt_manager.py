@@ -1,8 +1,14 @@
-import yaml, datetime, os
+import datetime
+import os
 from typing import Dict
 
+import yaml
+
+
 class PromptManager:
-    def __init__(self, prompt_dir="prompts", history_file="history/prompt_evolution.log"):
+    def __init__(
+        self, prompt_dir="prompts", history_file="history/prompt_evolution.log"
+    ):
         self.prompt_dir = prompt_dir
         self.history_file = history_file
         self.prompts = self._load_prompts()
@@ -19,22 +25,31 @@ class PromptManager:
                     elif "system" in data and "user" in data:
                         prompts[stage] = {
                             "system": data["system"],
-                            "user": data["user"]
+                            "user": data["user"],
                         }
                     else:
-                        raise ValueError(f"Prompt file {f} missing prompt or system/user keys")
+                        raise ValueError(
+                            f"Prompt file {f} missing prompt or system/user keys"
+                        )
         return prompts
 
     def save_refinement(self, stage, old_prompt, new_prompt, critique):
         os.makedirs(os.path.dirname(self.history_file), exist_ok=True)
         with open(self.history_file, "a") as f:
-            f.write(yaml.dump([{
-                "time": datetime.datetime.now().isoformat(),
-                "stage": stage,
-                "critique": critique,
-                "old_prompt": old_prompt.strip(),
-                "new_prompt": new_prompt.strip()
-            }], sort_keys=False))
+            f.write(
+                yaml.dump(
+                    [
+                        {
+                            "time": datetime.datetime.now().isoformat(),
+                            "stage": stage,
+                            "critique": critique,
+                            "old_prompt": old_prompt.strip(),
+                            "new_prompt": new_prompt.strip(),
+                        }
+                    ],
+                    sort_keys=False,
+                )
+            )
             f.write("\n---\n")
 
     def update_prompt(self, stage, new_prompt, critique):

@@ -23,7 +23,9 @@ class ExperimentAnalyzer:
     - Lightweight semantic hints (pattern-based)
     """
 
-    def __init__(self, db_path: Optional[str] = None, sample_rows: int = 25, timeout_sec: int = 5):
+    def __init__(
+        self, db_path: Optional[str] = None, sample_rows: int = 25, timeout_sec: int = 5
+    ):
         self.db_path = _get_db_path(db_path)
         self.sample_rows = int(sample_rows)
         self.timeout_sec = int(timeout_sec)
@@ -32,7 +34,9 @@ class ExperimentAnalyzer:
         # isolation_level=None keeps autocommit semantics; set timeout to avoid long locks
         return sqlite3.connect(self.db_path, timeout=self.timeout_sec)
 
-    def _syntax_ok(self, conn: sqlite3.Connection, sql: str, report: Dict[str, Any]) -> bool:
+    def _syntax_ok(
+        self, conn: sqlite3.Connection, sql: str, report: Dict[str, Any]
+    ) -> bool:
         try:
             # SQLite doesn't have a "parse only" mode; EXPLAIN is a good proxy for syntax validity.
             conn.execute("EXPLAIN " + sql)
@@ -43,7 +47,9 @@ class ExperimentAnalyzer:
             report["error"] = f"Syntax error: {e}"
             return False
 
-    def _execute(self, conn: sqlite3.Connection, sql: str, report: Dict[str, Any]) -> bool:
+    def _execute(
+        self, conn: sqlite3.Connection, sql: str, report: Dict[str, Any]
+    ) -> bool:
         try:
             cur = conn.cursor()
             cur.execute(sql)
@@ -51,7 +57,9 @@ class ExperimentAnalyzer:
             rows = cur.fetchmany(self.sample_rows)
             report["exec_ok"] = True
             report["row_count_sample"] = len(rows)
-            report["columns"] = [d[0] for d in cur.description] if cur.description else []
+            report["columns"] = (
+                [d[0] for d in cur.description] if cur.description else []
+            )
             # Convert rows to plain python types (lists) for JSON-serializability
             report["rows_sample"] = [list(r) for r in rows]
             return True
@@ -71,12 +79,18 @@ class ExperimentAnalyzer:
         hints: List[str] = []
         if "how many" in q_lower and "count(" not in sql_lower:
             hints.append("Question suggests COUNT but SQL lacks COUNT().")
-        if "between" in q_lower and (" between " not in sql_lower and ">" not in sql_lower and "<" not in sql_lower):
+        if "between" in q_lower and (
+            " between " not in sql_lower
+            and ">" not in sql_lower
+            and "<" not in sql_lower
+        ):
             hints.append("Question suggests range filter, but SQL has no BETWEEN/>/<.")
         if "join" in q_lower and " join " not in sql_lower:
             hints.append("Question implies combining entities; SQL has no JOIN.")
         if "list" in q_lower and "select" not in sql_lower:
-            hints.append("Question suggests listing values; SQL may be missing SELECT columns.")
+            hints.append(
+                "Question suggests listing values; SQL may be missing SELECT columns."
+            )
 
         return {
             "semantic_hint": hints[0] if hints else None,

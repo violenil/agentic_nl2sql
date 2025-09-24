@@ -1,10 +1,13 @@
 import json
-from datetime import datetime
 import os
-from langchain_openai import AzureChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
-from core.prompt_manager import PromptManager
+from datetime import datetime
 from typing import Any, Dict
+
+from langchain.schema import HumanMessage, SystemMessage
+from langchain_openai import AzureChatOpenAI
+
+from core.prompt_manager import PromptManager
+
 
 def sanitize_prompt(prompt: str) -> str:
     """Escape stray braces while preserving {question}, {stage1}, {stage2} placeholders."""
@@ -16,9 +19,14 @@ def sanitize_prompt(prompt: str) -> str:
         prompt = prompt.replace("{{" + ph.strip("{}") + "}}", ph)
     return prompt
 
+
 class RefinerAgent:
-    def __init__(self, prompt_manager: PromptManager, deployment_name: str = "lunar-gpt-4o",
-                 history_file: str = None):
+    def __init__(
+        self,
+        prompt_manager: PromptManager,
+        deployment_name: str = "lunar-gpt-4o",
+        history_file: str = None,
+    ):
         self.prompt_manager = prompt_manager
 
         if history_file is None:
@@ -34,13 +42,16 @@ class RefinerAgent:
             api_version="2024-12-01-preview",
             temperature=0,
             max_tokens=800,
-            model_kwargs={"response_format": {"type": "json_object"}}
+            model_kwargs={"response_format": {"type": "json_object"}},
         )
 
     def run(self, critique: Dict[str, Any]) -> Dict[str, Any]:
         stage = critique.get("likely_stage")
         if not stage or stage not in self.prompt_manager.prompts:
-            return {"status": "no_refinement", "reason": "No actionable stage identified"}
+            return {
+                "status": "no_refinement",
+                "reason": "No actionable stage identified",
+            }
 
         original_prompt = self.prompt_manager.prompts[stage]
 
@@ -50,13 +61,12 @@ class RefinerAgent:
         user_msg = template["user"].format(
             stage=stage,
             original_prompt=original_prompt,
-            critique_json=json.dumps(critique, indent=2)
+            critique_json=json.dumps(critique, indent=2),
         )
 
-        response = self.llm.invoke([
-            SystemMessage(content=system_msg),
-            HumanMessage(content=user_msg)
-        ])
+        response = self.llm.invoke(
+            [SystemMessage(content=system_msg), HumanMessage(content=user_msg)]
+        )
         text = response.content.strip()
 
         try:
@@ -81,6 +91,6 @@ class RefinerAgent:
             f.write(json.dumps(original_prompt, indent=2) + "\n")
             f.write("---- AFTER ----\n")
             f.write(json.dumps(new_prompt, indent=2) + "\n")
-            f.write("="*60 + "\n")
+            f.write("=" * 60 + "\n")
 
         return {"status": "refined", "stage": stage, "explanation": explanation}

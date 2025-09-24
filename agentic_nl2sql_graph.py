@@ -11,9 +11,12 @@ from agents.stage1 import Stage1Agent
 from agents.stage2 import Stage2Agent
 from agents.stage3 import Stage3Agent
 
+import dotenv
+
 from core.prompt_manager import PromptManager
 
 MAX_REFINEMENTS = int(os.getenv("MAX_REFINEMENTS", "3"))
+
 
 # Define shared state
 class NL2SQLState(TypedDict):
@@ -37,15 +40,18 @@ def stage1_node(state):
     state["stage1"] = agent.run(state["question"], state["schema"])
     return state
 
+
 def stage2_node(state):
     agent = Stage2Agent(state["prompt_manager"])
     state["stage2"] = agent.run(state["question"], state["stage1"])
     return state
 
+
 def stage3_node(state):
     agent = Stage3Agent(state["prompt_manager"])
     state["sql"] = agent.run(state["question"], state["stage1"], state["stage2"])
     return state
+
 
 def analyzer_node(state):
     """
@@ -63,10 +69,12 @@ def analyzer_node(state):
     state["analysis"] = analyzer.analyze(state["question"], state["sql"])
     return state
 
+
 def critique_node(state):
     agent = CriticAgent(state["prompt_manager"])
     state["critique"] = agent.run(state, state["analysis"])
     return state
+
 
 def refiner_node(state):
     history_file = None
@@ -81,6 +89,7 @@ def refiner_node(state):
     state["refinement_count"] = state.get("refinement_count", 0) + 1
 
     return state
+
 
 # Decision node
 def accept_refinement_node(state: NL2SQLState):
@@ -103,6 +112,7 @@ def accept_refinement_node(state: NL2SQLState):
     # Optional: could add semantic-hint based checks here
     return "reject"
 
+
 def refinement_router(state: NL2SQLState):
     """Decide whether to keep refining or stop."""
     if state.get("refinement_count", 0) >= MAX_REFINEMENTS:
@@ -111,11 +121,30 @@ def refinement_router(state: NL2SQLState):
     new = state.get("analysis", {})
 
     # If improved (syntax ok and more rows), stop early
-    if new.get("syntax_ok", False) and new.get("row_count_sample", 0) > old.get("row_count_sample", 0):
+    if new.get("syntax_ok", False) and new.get("row_count_sample", 0) > old.get(
+        "row_count_sample", 0
+    ):
         return "stop"
 
     # Otherwise, try another refinement
     return "refine_more"
+
+
+def rerun_start_router(state: NL2SQLState):
+    """Choose which stage to restart from based on the refiner's selected stage.
+
+    Expects state["refinement"]["stage"] to be one of: "stage1", "stage2", "stage3".
+    Defaults to stage1 if missing/invalid.
+    """
+    refinement = state.get("refinement", {}) or {}
+    stage = refinement.get("stage")
+    if stage == "stage3":
+        return "stage3_rerun"
+    if stage == "stage2":
+        return "stage2_rerun"
+    # Fallback and explicit stage1
+    return "stage1_rerun"
+
 
 # Init state with PromptManager
 pm = PromptManager(prompt_dir="prompts")
@@ -148,40 +177,51 @@ builder.add_edge("analyzer", "critic")
 builder.add_edge("critic", "refiner")
 
 # refinement loop
-builder.add_edge("refiner", "stage1_rerun")
+builder.add_conditional_edges(
+    "refiner",
+    rerun_start_router,
+    {
+        "stage1_rerun": "stage1_rerun",
+        "stage2_rerun": "stage2_rerun",
+        "stage3_rerun": "stage3_rerun",
+    },
+)
 builder.add_edge("stage1_rerun", "stage2_rerun")
 builder.add_edge("stage2_rerun", "stage3_rerun")
 builder.add_edge("stage3_rerun", "analyzer_rerun")
 
 # conditional decision after rerun
 builder.add_conditional_edges(
-    "analyzer_rerun",
-    refinement_router,
-    {"stop": END, "refine_more": "critic"}
+    "analyzer_rerun", refinement_router, {"stop": END, "refine_more": "critic"}
 )
 
 graph = builder.compile()
 
-import dotenv
 
 dotenv.load_dotenv(".env")
 
+
 def get_schema_string(db_path: str) -> str:
     import sqlite3
+
     conn = sqlite3.connect(db_path)
-    tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table';")]
+    tables = [
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    ]
     schema_lines = []
     for t in tables:
         cols = [col[1] for col in conn.execute(f"PRAGMA table_info({t});")]
         schema_lines.append(f"{t}({', '.join(cols)})")
     return "\n".join(schema_lines)
 
+
 if __name__ == "__main__":
     pm = PromptManager(prompt_dir="prompts")
 
     # Example NL question
-    #question = "In Formula 1 seasons since 2001, considering only drivers who scored points in a season, which five constructors have had the most seasons where their drivers scored the fewest total points among all point-scoring drivers in that season?"
-    question = "return me the homepage of PVLDB ."
+    question = "In Formula 1 seasons since 2001, considering only drivers who scored points in a season, which five constructors have had the most seasons where their drivers scored the fewest total points among all point-scoring drivers in that season?"
+    # question = "return me the homepage of PVLDB ."
     schema = get_schema_string(os.getenv("SQLITE_DB_FILE", None))
 
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")

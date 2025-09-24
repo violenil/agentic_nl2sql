@@ -4,10 +4,21 @@ prompt: |
   Select the relevant tables and attributes from the schema that are needed
   to answer the natural language question. Return the result strictly as JSON.
 
+  ⚠️ IMPORTANT RULES:
+  - Always align entities from the question (like names of people, conferences, journals, organizations)
+    with the semantically correct table in the schema.
+  - If multiple tables share the same attribute (e.g., "homepage"), determine which table is
+    the best semantic match for the entity mentioned.
+    Example: If the question is about "PVLDB", which is a journal, prefer the JOURNAL table
+    instead of CONFERENCE.
+  - Do not just select based on attribute overlap. Use both the entity type (conference vs journal, person vs organization)
+    and the schema context.
+  - Include only the minimal set of tables and attributes necessary.
+
   Example:
   {{
-    "tables": ["student"],
-    "attributes": ["age"]
+    "tables": ["journal"],
+    "attributes": ["homepage"]
   }}
 
   Question:
